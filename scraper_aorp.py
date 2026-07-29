@@ -27,64 +27,62 @@ def fetch_aorp_quotes():
         
     soup = BeautifulSoup(response.content, "html.parser")
     
+    data_cotacao = None
     ouro_fino = None
     prata_fina = None
-    data_cotacao = None
 
-    # 1. Procurar em todas as tabelas
+    # Tenta encontrar a tabela principal
     tables = soup.find_all("table")
     for table in tables:
-        for row in table.find_all("tr"):
+        rows = table.find_all("tr")
+        for row in rows:
             cols = [ele.text.strip() for ele in row.find_all(["td", "th"])]
-            nums = []
-            for col in cols:
-                # Procura valores decimais no texto da coluna
-                found = re.findall(r'\d+(?:[,\.]\d+)?', col)
-                for f in found:
-                    try:
-                        val = float(f.replace(",", "."))
-                        if val > 0:
-                            nums.append(val)
-                    except ValueError:
-                        pass
-            if len(nums) >= 2:
-                ouro_fino = nums[0]
-                prata_fina = nums[1]
-                data_cotacao = cols[0] if cols else datetime.now().strftime("%d/%m/%Y")
-                print(f"✅ Cotação encontrada na tabela: Ouro={ouro_fino}, Prata={prata_fina}")
-                break
+            
+            # Precisamos de 3 colunas: Data, Ouro, Prata
+            if len(cols) >= 3:
+                # Exemplo cols: ["29 · 07 · 2026", "117.563", "1757.76"]
+                col_data = cols[0]
+                col_ouro = cols[1]
+                col_prata = cols[2]
+                
+                # Ignorar cabeçalho caso contenha "DATA" ou "OURO"
+                if "DATA" in col_data.upper() or "OURO" in col_ouro.upper():
+                    continue
+
+                try:
+                    # Limpeza das strings
+                    ouro_val = float(col_ouro.replace(",", ".").replace(" ", "").strip())
+                    prata_val = float(col_prata.replace(",", ".").replace(" ", "").strip())
+                    
+                    # Normaliza a data (ex: "29 · 07 · 2026" -> "29/07/2026")
+                    data_clean = re.sub(r'\s*[\·\.\-]\s*', '/', col_data.strip())
+                    
+                    ouro_fino = ouro_val
+                    prata_fina = prata_val
+                    data_cotacao = data_clean
+                    print(f"✅ Sucesso ao extrair: Data={data_cotacao}, Ouro={ouro_fino}, Prata={prata_fina}")
+                    break
+                except ValueError:
+                    continue
         if ouro_fino is not None:
             break
 
-    # 2. Procurar em tags de texto (div, p, span, td) com regex amplo
+    # Fallback se a tabela não tiver a tag <table>
     if ouro_fino is None or prata_fina is None:
         full_text = soup.get_text()
-        print("ℹ️ Diagnóstico - Amostra do texto da página:")
-        print(full_text[:500].replace('\n', ' '))
-        
-        # Procurar padrões de números com vírgula ou ponto seguidos de € ou isolados
-        matches = re.findall(r'(\d{2,4}(?:[,\.]\d{1,2})?)', full_text)
-        valid_nums = []
-        for m in matches:
-            try:
-                val = float(m.replace(",", "."))
-                # Filtra números razoáveis para cotações de Ouro/Prata
-                if 10 <= val <= 5000:
-                    valid_nums.append(val)
-            except ValueError:
-                pass
-
-        if len(valid_nums) >= 2:
-            ouro_fino = valid_nums[0]
-            prata_fina = valid_nums[1]
-            data_cotacao = datetime.now().strftime("%d/%m/%Y")
-            print(f"✅ Cotação extraída do texto: Ouro={ouro_fino}, Prata={prata_fina}")
+        # Procura padrões de 3 números na página onde o 2º tem decimais (Ouro) e o 3º é > 1000 (Prata)
+        matches = re.findall(r'(\d{2}\s*[\·\.\-/]\s*\d{2}\s*[\·\.\-/]\s*\d{4})\s+([\d\.]+)\s+([\d\.]+)', full_text)
+        if matches:
+            d, o, p = matches[0]
+            data_cotacao = re.sub(r'\s*[\·\.\-]\s*', '/', d.strip())
+            ouro_fino = float(o)
+            prata_fina = float(p)
 
     if ouro_fino is None or prata_fina is None:
-        raise Exception("Não foi possível extrair os valores do Ouro e Prata. Verifica os logs de diagnóstico.")
+        raise Exception("Não foi possível extrair os valores do Ouro e Prata da página.")
 
     return {
-        "data_cotacao": str(data_cotacao),
+        "data_cotacao": data_cotacao,
         "ouro_fino_eur_g": ouro_fino,
         "prata_fina_eur_kg": prata_fina,
         "atualizado_em": firestore.SERVER_TIMESTAMP
@@ -104,11 +102,12 @@ def update_firebase(quote_data):
         
     db = firestore.client()
     
-    doc_id = datetime.now().strftime("%Y-%m-%d")
+    # ID do documento limpo ex: "29-07-2026"
+    doc_id = quote_data["data_cotacao"].replace("/", "-")
     doc_ref = db.collection("cotacoes_diarias").document(doc_id)
     
     doc_ref.set(quote_data)
-    print(f"✅ Nova cotação registada no Firebase! ID: {doc_id}")
+    print(f"✅ Nova cotação registada no Firebase com sucesso! ID: {doc_id}")
     db.collection("configuracoes").document("ultima_cotacao").set(quote_data)
 
 if __name__ == "__main__":
